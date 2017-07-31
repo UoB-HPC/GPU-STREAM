@@ -53,12 +53,34 @@ void run();
 
 void parseArguments(int argc, char *argv[]);
 
+#ifdef USE_MPI
+  #include <mpi.h>
+  // MPI parameters
+  int rank, procs;
+#endif
+
 int main(int argc, char *argv[])
 {
-  std::cout
+#ifdef USE_MPI
+  int provided;
+  MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+  if (provided < MPI_THREAD_FUNNELED) MPI_Abort(MPI_COMM_WORLD, provided);
+
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &procs);
+#endif
+
+#ifdef USE_MPI
+  if (rank == 0) {
+#endif
+    std::cout
     << "BabelStream" << std::endl
     << "Version: " << VERSION_STRING << std::endl
     << "Implementation: " << IMPLEMENTATION_STRING << std::endl;
+#ifdef USE_MPI
+    std::cout << "Number of MPI ranks: " << procs << std::endl;
+  }
+#endif
 
   parseArguments(argc, argv);
 
@@ -70,29 +92,55 @@ int main(int argc, char *argv[])
 #endif
     run<double>();
 
+  // End MPI
+#ifdef USE_MPI
+  MPI_Finalize();
+#endif
 }
 
 template <typename T>
 void run()
 {
+#ifdef USE_MPI
+  if (rank == 0)
+#endif
+
+  {
   std::cout << "Running kernels " << num_times << " times" << std::endl;
 
   if (sizeof(T) == sizeof(float))
     std::cout << "Precision: float" << std::endl;
   else
     std::cout << "Precision: double" << std::endl;
+  }
 
   // Create host vectors
   std::vector<T> a(ARRAY_SIZE);
   std::vector<T> b(ARRAY_SIZE);
   std::vector<T> c(ARRAY_SIZE);
+
+#ifdef USE_MPI
+if (rank == 0)
+#endif
+  {
   std::streamsize ss = std::cout.precision();
   std::cout << std::setprecision(1) << std::fixed
-    << "Array size: " << ARRAY_SIZE*sizeof(T)*1.0E-6 << " MB"
-    << " (=" << ARRAY_SIZE*sizeof(T)*1.0E-9 << " GB)" << std::endl;
-  std::cout << "Total size: " << 3.0*ARRAY_SIZE*sizeof(T)*1.0E-6 << " MB"
+#ifdef USE_MPI
+    << "Array size (per rank): "
+#else
+    << "Array size: "
+#endif
+    << ARRAY_SIZE*sizeof(T)*1.0E-6 << " MB"
+    << " (=" << ARRAY_SIZE*sizeof(T)*1.0E-9 << " GB)" << std::endl
+#ifdef USE_MPI
+    << "Total size (per rank): "
+#else
+    << "Total size: "
+#endif
+    << 3.0*ARRAY_SIZE*sizeof(T)*1.0E-6 << " MB"
     << " (=" << 3.0*ARRAY_SIZE*sizeof(T)*1.0E-9 << " GB)" << std::endl;
   std::cout.precision(ss);
+  }
 
   // Result of the Dot kernel
   T sum;
@@ -145,36 +193,56 @@ void run()
   // Declare timers
   std::chrono::high_resolution_clock::time_point t1, t2;
 
+
   // Main loop
   for (unsigned int k = 0; k < num_times; k++)
   {
+    #ifdef USE_MPI
+      MPI_Barrier(MPI_COMM_WORLD);
+    #endif
+
     // Execute Copy
     t1 = std::chrono::high_resolution_clock::now();
     stream->copy();
+    #ifdef USE_MPI
+      MPI_Barrier(MPI_COMM_WORLD);
+    #endif
     t2 = std::chrono::high_resolution_clock::now();
     timings[0].push_back(std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count());
 
     // Execute Mul
     t1 = std::chrono::high_resolution_clock::now();
     stream->mul();
+    #ifdef USE_MPI
+      MPI_Barrier(MPI_COMM_WORLD);
+    #endif
     t2 = std::chrono::high_resolution_clock::now();
     timings[1].push_back(std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count());
 
     // Execute Add
     t1 = std::chrono::high_resolution_clock::now();
     stream->add();
+    #ifdef USE_MPI
+      MPI_Barrier(MPI_COMM_WORLD);
+    #endif
     t2 = std::chrono::high_resolution_clock::now();
     timings[2].push_back(std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count());
 
     // Execute Triad
     t1 = std::chrono::high_resolution_clock::now();
     stream->triad();
+    #ifdef USE_MPI
+      MPI_Barrier(MPI_COMM_WORLD);
+    #endif
     t2 = std::chrono::high_resolution_clock::now();
     timings[3].push_back(std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count());
 
     // Execute Dot
     t1 = std::chrono::high_resolution_clock::now();
     sum = stream->dot();
+    #ifdef USE_MPI
+      MPI_Allreduce(MPI_IN_PLACE, &sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    #endif
     t2 = std::chrono::high_resolution_clock::now();
     timings[4].push_back(std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count());
 
@@ -182,9 +250,18 @@ void run()
 
   // Check solutions
   stream->read_arrays(a, b, c);
+
+#ifdef USE_MPI
+  // Only check solutions on the master rank in case verificaiton fails
+  if (rank == 0)
+#endif
   check_solution<T>(num_times, a, b, c, sum);
 
   // Display timing results
+#ifdef USE_MPI
+  if (rank == 0)
+#endif
+  {
   std::cout
     << std::left << std::setw(12) << "Function"
     << std::left << std::setw(12) << "MBytes/sec"
@@ -193,6 +270,7 @@ void run()
     << std::left << std::setw(12) << "Average" << std::endl;
 
   std::cout << std::fixed;
+  }
 
   std::string labels[5] = {"Copy", "Mul", "Add", "Triad", "Dot"};
   size_t sizes[5] = {
@@ -207,19 +285,42 @@ void run()
   {
     // Get min/max; ignore the first result
     auto minmax = std::minmax_element(timings[i].begin()+1, timings[i].end());
+    double min = *minmax.first;
+    double max = *minmax.second;
 
     // Calculate average; ignore the first result
-    double average = std::accumulate(timings[i].begin()+1, timings[i].end(), 0.0) / (double)(num_times - 1);
+    double average = std::accumulate(timings[i].begin()+1, timings[i].end(), 0.0);
+
+#ifdef USE_MPI
+    // Collate timings
+    if (rank == 0)
+    {
+      MPI_Reduce(MPI_IN_PLACE, &min, 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
+      MPI_Reduce(MPI_IN_PLACE, &max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    }
+    else
+    {
+      MPI_Reduce(&min, NULL, 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
+      MPI_Reduce(&max, NULL, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    }
+    sizes[i] *= procs;
+#endif
+
+    average = average / (double)(num_times - 1);
 
     // Display results
+#ifdef USE_MPI
+    if (rank == 0)
+#endif
+    {
     std::cout
       << std::left << std::setw(12) << labels[i]
-      << std::left << std::setw(12) << std::setprecision(3) << 1.0E-6 * sizes[i] / (*minmax.first)
-      << std::left << std::setw(12) << std::setprecision(5) << *minmax.first
-      << std::left << std::setw(12) << std::setprecision(5) << *minmax.second
+      << std::left << std::setw(12) << std::setprecision(3) << 1.0E-6 * sizes[i] / min
+      << std::left << std::setw(12) << std::setprecision(5) << min
+      << std::left << std::setw(12) << std::setprecision(5) << max
       << std::left << std::setw(12) << std::setprecision(5) << average
       << std::endl;
-
+    }
   }
 
   delete stream;
@@ -248,6 +349,10 @@ void check_solution(const unsigned int ntimes, std::vector<T>& a, std::vector<T>
 
   // Do the reduction
   goldSum = goldA * goldB * ARRAY_SIZE;
+
+#ifdef USE_MPI
+    goldSum *= (T)procs;
+#endif
 
   // Calculate the average error
   double errA = std::accumulate(a.begin(), a.end(), 0.0, [&](double sum, const T val){ return sum + fabs(val - goldA); });
