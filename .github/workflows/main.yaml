@@ -3,8 +3,11 @@ on: [push, pull_request]
 
 
 jobs:
-  test:
+  "test_compile_cpp":
     runs-on: ubuntu-18.04
+    defaults:
+      run:
+        working-directory: ./src
     steps:
       - uses: actions/checkout@v2
 
@@ -13,7 +16,7 @@ jobs:
         uses: actions/cache@v2
         with:
           path: compilers
-          key: ${{ runner.os }}-${{ hashFiles('ci-prepare-bionic.sh') }}
+          key: ${{ runner.os }}-${{ hashFiles('./src/ci-prepare-bionic.sh') }}
 
       - name: Prepare compilers
         if: steps.prepare-compilers.outputs.cache-hit != 'true'
